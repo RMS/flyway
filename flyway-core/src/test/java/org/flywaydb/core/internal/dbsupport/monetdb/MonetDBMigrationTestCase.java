@@ -1,5 +1,5 @@
 /**
- * Copyright 2010-2014 Axel Fontaine
+ * Copyright 2010-2015 Axel Fontaine
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -92,7 +92,7 @@ public abstract class MonetDBMigrationTestCase extends MigrationTestCase {
         assertEquals(150, jdbcTemplate.queryForInt("SELECT value FROM v"));
 
         flyway.clean();
-        flyway.init(); // FIXME why???
+        //flyway.init(); // FIXME why???
 
         // Running migrate again on an unclean database, triggers duplicate object exceptions.
         flyway.migrate();

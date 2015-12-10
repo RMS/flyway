@@ -1,5 +1,5 @@
 /**
- * Copyright 2010-2014 Axel Fontaine
+ * Copyright 2010-2015 Axel Fontaine
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,19 +42,18 @@ public class MonetDBDbSupport extends DbSupport {
         return "monetdb";
     }
 
+    @Override
+    protected String doGetCurrentSchemaName() throws SQLException {
+        return jdbcTemplate.queryForString("select CURRENT_SCHEMA");
+    }
+
+    @Override
+    protected void doChangeCurrentSchemaTo(String schema) throws SQLException {
+        jdbcTemplate.execute("set schema " + schema);
+    }
+
     public String getCurrentUserFunction() {
         return "CURRENT_USER";
-    }
-
-    @Override
-    protected String doGetCurrentSchema() throws SQLException {
-    	String schemaName = jdbcTemplate.queryForString("select CURRENT_SCHEMA");
-        return schemaName;
-    }
-
-    @Override
-    protected void doSetCurrentSchema(Schema schema) throws SQLException {
-    	jdbcTemplate.execute("set schema " + schema);
     }
 
     public boolean supportsDdlTransactions() {
