@@ -248,6 +248,10 @@ public class DriverDataSource implements DataSource {
             return "com.vertica.jdbc.Driver";
         }
 
+        if (url.startsWith("jdbc:monetdb:")) {
+        	return "nl.cwi.monetdb.jdbc.MonetDriver";
+        }
+        
         return null;
     }
 
