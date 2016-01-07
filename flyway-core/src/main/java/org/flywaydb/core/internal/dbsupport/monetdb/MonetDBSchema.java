@@ -76,7 +76,9 @@ public class MonetDBSchema extends Schema<MonetDBDbSupport> {
 
 	@Override
 	protected void doDrop() throws SQLException {
-		jdbcTemplate.execute("set role flyway");
+//		jdbcTemplate.execute("set role flyway");
+		jdbcTemplate.execute("set role monetdb");
+		jdbcTemplate.execute("set schema sys");
 		jdbcTemplate.execute("DROP SCHEMA " + dbSupport.quote(name) + " cascade");
 	}
 
