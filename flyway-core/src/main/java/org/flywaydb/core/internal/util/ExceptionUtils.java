@@ -1,5 +1,5 @@
-/**
- * Copyright 2010-2015 Axel Fontaine
+/*
+ * Copyright 2010-2018 Boxfuse GmbH
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 package org.flywaydb.core.internal.util;
+
+import java.sql.SQLException;
 
 /**
  * Utility class for dealing with exceptions.
@@ -30,7 +32,6 @@ public class ExceptionUtils {
      * Returns the root cause of this throwable.
      *
      * @param throwable The throwable to inspect.
-     *
      * @return The root cause or the throwable itself if it doesn't have a cause.
      */
     public static Throwable getRootCause(Throwable throwable) {
@@ -45,5 +46,41 @@ public class ExceptionUtils {
         }
 
         return cause;
+    }
+
+    /**
+     * Retrives the exact location where this exception was thrown.
+     *
+     * @param e The exception.
+     * @return The location, suitable for a debug message.
+     */
+    public static String getThrowLocation(Throwable e) {
+        StackTraceElement element = e.getStackTrace()[0];
+        int lineNumber = element.getLineNumber();
+        return element.getClassName() + "." + element.getMethodName()
+                + (lineNumber < 0 ? "" : ":" + lineNumber)
+                + (element.isNativeMethod() ? " [native]" : "");
+    }
+
+    /**
+     * Transforms the details of this SQLException into a nice readable message.
+     *
+     * @param e The exception.
+     * @return The message.
+     */
+    public static String toMessage(SQLException e) {
+        SQLException cause = e;
+        while (cause.getNextException() != null) {
+            cause = cause.getNextException();
+        }
+
+        String message = "SQL State  : " + cause.getSQLState() + "\n"
+                + "Error Code : " + cause.getErrorCode() + "\n";
+        if (cause.getMessage() != null) {
+            message += "Message    : " + cause.getMessage().trim() + "\n";
+        }
+
+        return message;
+
     }
 }

@@ -1,5 +1,5 @@
-/**
- * Copyright 2010-2015 Axel Fontaine
+/*
+ * Copyright 2010-2018 Boxfuse GmbH
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,27 +17,25 @@ package org.flywaydb.commandline;
 
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.FlywayException;
+import org.flywaydb.core.api.MigrationInfo;
+import org.flywaydb.core.api.MigrationInfoService;
+import org.flywaydb.core.api.MigrationVersion;
+import org.flywaydb.core.api.logging.Log;
+import org.flywaydb.core.api.logging.LogFactory;
+import org.flywaydb.core.internal.configuration.ConfigUtils;
 import org.flywaydb.core.internal.info.MigrationInfoDumper;
 import org.flywaydb.core.internal.util.ClassUtils;
-import org.flywaydb.core.internal.util.FileCopyUtils;
 import org.flywaydb.core.internal.util.StringUtils;
-import org.flywaydb.core.internal.util.VersionPrinter;
-import org.flywaydb.core.internal.util.logging.Log;
-import org.flywaydb.core.internal.util.logging.LogFactory;
-import org.flywaydb.core.internal.util.logging.console.ConsoleLog.Level;
-import org.flywaydb.core.internal.util.logging.console.ConsoleLogCreator;
+import org.flywaydb.core.internal.license.VersionPrinter;
+import org.flywaydb.core.internal.logging.console.ConsoleLog.Level;
+import org.flywaydb.core.internal.logging.console.ConsoleLogCreator;
 
 import java.io.Console;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FilenameFilter;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.StringReader;
-import java.lang.reflect.Method;
-import java.net.URL;
-import java.net.URLClassLoader;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -47,6 +45,10 @@ import java.util.Properties;
  */
 public class Main {
     private static Log LOG;
+
+    private static List<String> VALID_OPERATIONS_AND_FLAGS = Arrays.asList("-X", "-q", "-n", "-v", "-?",
+            "-community", "-pro", "-enterprise",
+            "help", "migrate", "clean", "info", "validate", "undo", "baseline", "repair");
 
     /**
      * Initializes the logging.
@@ -68,29 +70,39 @@ public class Main {
         initLogging(logLevel);
 
         try {
-            printVersion();
             if (isPrintVersionAndExit(args)) {
+                printVersion();
                 System.exit(0);
             }
 
             List<String> operations = determineOperations(args);
-            if (operations.isEmpty()) {
+            if (operations.isEmpty() || operations.contains("help") || isFlagSet(args, "-?")) {
                 printUsage();
                 return;
             }
 
+            validateArgs(args);
+
+            Map<String, String> envVars = ConfigUtils.environmentVariablesToPropertyMap();
+
             Properties properties = new Properties();
             initializeDefaults(properties);
-            loadConfiguration(properties, args);
-            overrideConfiguration(properties, args);
-            promptForCredentialsIfMissing(properties);
+            loadConfigurationFromConfigFiles(properties, args, envVars);
+            properties.putAll(envVars);
+            overrideConfigurationWithArgs(properties, args);
+
+            if (!isSuppressPrompt(args)) {
+                promptForCredentialsIfMissing(properties);
+            }
+
             dumpConfiguration(properties);
 
-            loadJdbcDrivers();
-            loadJavaMigrationsFromJarDirs(properties);
+            ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+            classLoader = loadJdbcDrivers(classLoader);
+            classLoader = loadJavaMigrationsFromJarDirs(classLoader, properties);
 
-            Flyway flyway = new Flyway();
-            flyway.configure(properties);
+            filterProperties(properties);
+            Flyway flyway = Flyway.configure(classLoader).configuration(properties).load();
 
             for (String operation : operations) {
                 executeOperation(flyway, operation);
@@ -109,9 +121,25 @@ public class Main {
         }
     }
 
-    private static boolean isPrintVersionAndExit(String[] args) {
+    static void validateArgs(String[] args) {
         for (String arg : args) {
-            if ("-v".equals(arg)) {
+            if (!isPropertyArgument(arg) && !VALID_OPERATIONS_AND_FLAGS.contains(arg)) {
+                throw new FlywayException("Invalid argument: " + arg);
+            }
+        }
+    }
+
+    private static boolean isPrintVersionAndExit(String[] args) {
+        return isFlagSet(args, "-v");
+    }
+
+    private static boolean isSuppressPrompt(String[] args) {
+        return isFlagSet(args, "-n");
+    }
+
+    private static boolean isFlagSet(String[] args, String flag) {
+        for (String arg : args) {
+            if (flag.equals(arg)) {
                 return true;
             }
         }
@@ -131,10 +159,17 @@ public class Main {
             flyway.baseline();
         } else if ("migrate".equals(operation)) {
             flyway.migrate();
+        } else if ("undo".equals(operation)) {
+            flyway.undo();
         } else if ("validate".equals(operation)) {
             flyway.validate();
         } else if ("info".equals(operation)) {
-            LOG.info("\n" + MigrationInfoDumper.dumpToAsciiTable(flyway.info().all()));
+            MigrationInfoService info = flyway.info();
+            MigrationInfo current = info.current();
+            MigrationVersion currentSchemaVersion = current == null ? MigrationVersion.EMPTY : current.getVersion();
+            LOG.info("Schema version: " + currentSchemaVersion);
+            LOG.info("");
+            LOG.info(MigrationInfoDumper.dumpToAsciiTable(info.all()));
         } else if ("repair".equals(operation)) {
             flyway.repair();
         } else {
@@ -168,17 +203,26 @@ public class Main {
      * @param properties The properties object to initialize.
      */
     private static void initializeDefaults(Properties properties) {
-        properties.put("flyway.locations", "filesystem:" + new File(getInstallationDir(), "sql").getAbsolutePath());
-        properties.put("flyway.jarDirs", new File(getInstallationDir(), "jars").getAbsolutePath());
+        properties.put(ConfigUtils.LOCATIONS, "filesystem:" + new File(getInstallationDir(), "sql").getAbsolutePath());
+        properties.put(ConfigUtils.JAR_DIRS, new File(getInstallationDir(), "jars").getAbsolutePath());
+    }
+
+    /**
+     * Filters there properties to remove the Flyway Commandline-specific ones.
+     *
+     * @param properties The properties to filter.
+     */
+    private static void filterProperties(Properties properties) {
+        properties.remove(ConfigUtils.JAR_DIRS);
+        properties.remove(ConfigUtils.CONFIG_FILES);
+        properties.remove(ConfigUtils.CONFIG_FILE_ENCODING);
     }
 
     /**
      * Prints the version number on the console.
-     *
-     * @throws IOException when the version could not be read.
      */
-    private static void printVersion() throws IOException {
-        VersionPrinter.printVersion();
+    private static void printVersion() {
+        VersionPrinter.printVersionOnly();
         LOG.info("");
 
         LOG.debug("Java " + System.getProperty("java.version") + " (" + System.getProperty("java.vendor") + ")");
@@ -203,56 +247,85 @@ public class Main {
         LOG.info("clean    : Drops all objects in the configured schemas");
         LOG.info("info     : Prints the information about applied, current and pending migrations");
         LOG.info("validate : Validates the applied migrations against the ones on the classpath");
+        LOG.info("undo     : [" + "pro] Undoes the most recently applied versioned migration");
         LOG.info("baseline : Baselines an existing database at the baselineVersion");
-        LOG.info("repair   : Repairs the metadata table");
+        LOG.info("repair   : Repairs the schema history table");
         LOG.info("");
         LOG.info("Options (Format: -key=value)");
         LOG.info("-------");
-        LOG.info("driver                 : Fully qualified classname of the jdbc driver");
-        LOG.info("url                    : Jdbc url to use to connect to the database");
-        LOG.info("user                   : User to use to connect to the database");
-        LOG.info("password               : Password to use to connect to the database");
-        LOG.info("schemas                : Comma-separated list of the schemas managed by Flyway");
-        LOG.info("table                  : Name of Flyway's metadata table");
-        LOG.info("locations              : Classpath locations to scan recursively for migrations");
-        LOG.info("resolvers              : Comma-separated list of custom MigrationResolvers");
-        LOG.info("sqlMigrationPrefix     : File name prefix for Sql migrations");
-        LOG.info("sqlMigrationSeparator  : File name separator for Sql migrations");
-        LOG.info("sqlMigrationSuffix     : File name suffix for Sql migrations");
-        LOG.info("encoding               : Encoding of Sql migrations");
-        LOG.info("placeholderReplacement : Whether placeholders should be replaced");
-        LOG.info("placeholders           : Placeholders to replace in Sql migrations");
-        LOG.info("placeholderPrefix      : Prefix of every placeholder");
-        LOG.info("placeholderSuffix      : Suffix of every placeholder");
-        LOG.info("target                 : Target version up to which Flyway should use migrations");
-        LOG.info("outOfOrder             : Allows migrations to be run \"out of order\"");
-        LOG.info("callbacks              : Comma-separated list of FlywayCallback classes");
-        LOG.info("validateOnMigrate      : Validate when running migrate");
-        LOG.info("cleanOnValidationError : Automatically clean on a validation error");
-        LOG.info("baselineVersion        : Version to tag schema with when executing baseline");
-        LOG.info("baselineDescription    : Description to tag schema with when executing baseline");
-        LOG.info("baselineOnMigrate      : Baseline on migrate against uninitialized non-empty schema");
-        LOG.info("configFile             : Config file to use (default: conf/flyway.properties)");
-        LOG.info("configFileEncoding     : Encoding of the config file (default: UTF-8)");
-        LOG.info("jarDirs                : Dirs for Jdbc drivers & Java migrations (default: jars)");
+        LOG.info("driver                       : Fully qualified classname of the JDBC driver");
+        LOG.info("url                          : Jdbc url to use to connect to the database");
+        LOG.info("user                         : User to use to connect to the database");
+        LOG.info("password                     : Password to use to connect to the database");
+        LOG.info("connectRetries               : Maximum number of retries when attempting to connect to the database");
+        LOG.info("initSql                      : SQL statements to run to initialize a new database connection");
+        LOG.info("schemas                      : Comma-separated list of the schemas managed by Flyway");
+        LOG.info("table                        : Name of Flyway's schema history table");
+        LOG.info("locations                    : Classpath locations to scan recursively for migrations");
+        LOG.info("resolvers                    : Comma-separated list of custom MigrationResolvers");
+        LOG.info("skipDefaultResolvers         : Skips default resolvers (jdbc, sql and Spring-jdbc)");
+        LOG.info("sqlMigrationPrefix           : File name prefix for versioned SQL migrations");
+        LOG.info("undoSqlMigrationPrefix       : [" + "pro] File name prefix for undo SQL migrations");
+        LOG.info("repeatableSqlMigrationPrefix : File name prefix for repeatable SQL migrations");
+        LOG.info("sqlMigrationSeparator        : File name separator for SQL migrations");
+        LOG.info("sqlMigrationSuffixes         : Comma-separated list of file name suffixes for SQL migrations");
+        LOG.info("stream                       : [" + "pro] Stream SQL migrations when executing them");
+        LOG.info("batch                        : [" + "pro] Batch SQL statements when executing them");
+        LOG.info("mixed                        : Allow mixing transactional and non-transactional statements");
+        LOG.info("encoding                     : Encoding of SQL migrations");
+        LOG.info("placeholderReplacement       : Whether placeholders should be replaced");
+        LOG.info("placeholders                 : Placeholders to replace in sql migrations");
+        LOG.info("placeholderPrefix            : Prefix of every placeholder");
+        LOG.info("placeholderSuffix            : Suffix of every placeholder");
+        LOG.info("installedBy                  : Username that will be recorded in the schema history table");
+        LOG.info("target                       : Target version up to which Flyway should use migrations");
+        LOG.info("outOfOrder                   : Allows migrations to be run \"out of order\"");
+        LOG.info("callbacks                    : Comma-separated list of FlywayCallback classes");
+        LOG.info("skipDefaultCallbacks         : Skips default callbacks (sql)");
+        LOG.info("validateOnMigrate            : Validate when running migrate");
+        LOG.info("ignoreMissingMigrations      : Allow missing migrations when validating");
+        LOG.info("ignoreIgnoredMigrations      : Allow ignored migrations when validating");
+        LOG.info("ignorePendingMigrations      : Allow pending migrations when validating");
+        LOG.info("ignoreFutureMigrations       : Allow future migrations when validating");
+        LOG.info("cleanOnValidationError       : Automatically clean on a validation error");
+        LOG.info("cleanDisabled                : Whether to disable clean");
+        LOG.info("baselineVersion              : Version to tag schema with when executing baseline");
+        LOG.info("baselineDescription          : Description to tag schema with when executing baseline");
+        LOG.info("baselineOnMigrate            : Baseline on migrate against uninitialized non-empty schema");
+        LOG.info("configFiles                  : Comma-separated list of config files to use");
+        LOG.info("configFileEncoding           : Encoding to use when loading the config files");
+        LOG.info("jarDirs                      : Comma-separated list of dirs for Jdbc drivers & Java migrations");
+        LOG.info("dryRunOutput                 : [" + "pro] File where to output the SQL statements of a migration dry run");
+        LOG.info("errorOverrides               : [" + "pro] Rules to override specific SQL states and errors codes");
+        LOG.info("oracle.sqlplus               : [" + "pro] Enable Oracle SQL*Plus command support");
+        LOG.info("licenseKey                   : [" + "pro] Your Flyway license key");
         LOG.info("");
-        LOG.info("Add -X to print debug output");
-        LOG.info("Add -q to suppress all output, except for errors and warnings");
-        LOG.info("Add -v to print the Flyway version and exit");
+        LOG.info("Flags");
+        LOG.info("-----");
+        LOG.info("-X          : Print debug output");
+        LOG.info("-q          : Suppress all output, except for errors and warnings");
+        LOG.info("-n          : Suppress prompting for a user and password");
+        LOG.info("-v          : Print the Flyway version and exit");
+        LOG.info("-?          : Print this usage info and exit");
+        LOG.info("-community  : Run the Flyway Community Edition (default)");
+        LOG.info("-pro        : Run the Flyway Pro Edition");
+        LOG.info("-enterprise : Run the Flyway Enterprise Edition");
         LOG.info("");
         LOG.info("Example");
         LOG.info("-------");
         LOG.info("flyway -user=myuser -password=s3cr3t -url=jdbc:h2:mem -placeholders.abc=def migrate");
         LOG.info("");
-        LOG.info("More info at http://flywaydb.org/documentation/commandline");
+        LOG.info("More info at https://flywaydb.org/documentation/commandline");
     }
 
     /**
      * Loads all the driver jars contained in the drivers folder. (For Jdbc drivers)
      *
+     * @param classLoader The current ClassLoader.
+     * @return The new ClassLoader containing the additional driver jars.
      * @throws IOException When the jars could not be loaded.
      */
-    private static void loadJdbcDrivers() throws IOException {
+    private static ClassLoader loadJdbcDrivers(ClassLoader classLoader) throws IOException {
         File driversDir = new File(getInstallationDir(), "drivers");
         File[] files = driversDir.listFiles(new FilenameFilter() {
             public boolean accept(File dir, String name) {
@@ -262,25 +335,29 @@ public class Main {
 
         // see javadoc of listFiles(): null if given path is not a real directory
         if (files == null) {
-            LOG.error("Directory for Jdbc Drivers not found: " + driversDir.getAbsolutePath());
-            System.exit(1);
+            LOG.debug("Directory for Jdbc Drivers not found: " + driversDir.getAbsolutePath());
+            return classLoader;
         }
 
         for (File file : files) {
-            addJarOrDirectoryToClasspath(file.getPath());
+            classLoader = ClassUtils.addJarOrDirectoryToClasspath(classLoader, file.getPath());
         }
+
+        return classLoader;
     }
 
     /**
      * Loads all the jars contained in the jars folder. (For Java Migrations)
      *
-     * @param properties The configured properties.
+     * @param classLoader The current ClassLoader.
+     * @param properties  The configured properties.
+     * @return The new ClassLoader containing the additional jars.
      * @throws IOException When the jars could not be loaded.
      */
-    private static void loadJavaMigrationsFromJarDirs(Properties properties) throws IOException {
-        String jarDirs = properties.getProperty("flyway.jarDirs");
+    private static ClassLoader loadJavaMigrationsFromJarDirs(ClassLoader classLoader, Properties properties) throws IOException {
+        String jarDirs = properties.getProperty(ConfigUtils.JAR_DIRS);
         if (!StringUtils.hasLength(jarDirs)) {
-            return;
+            return classLoader;
         }
 
         jarDirs = jarDirs.replace(File.pathSeparator, ",");
@@ -301,30 +378,11 @@ public class Main {
             }
 
             for (File file : files) {
-                addJarOrDirectoryToClasspath(file.getPath());
+                classLoader = ClassUtils.addJarOrDirectoryToClasspath(classLoader, file.getPath());
             }
         }
-    }
 
-    /**
-     * Adds a jar or a directory with this name to the classpath.
-     *
-     * @param name The name of the jar or directory to add.
-     * @throws IOException when the jar or directory could not be found.
-     */
-    /* private -> for testing */
-    static void addJarOrDirectoryToClasspath(String name) throws IOException {
-        LOG.debug("Adding location to classpath: " + name);
-
-        try {
-            URL url = new File(name).toURI().toURL();
-            URLClassLoader sysloader = (URLClassLoader) ClassLoader.getSystemClassLoader();
-            Method method = URLClassLoader.class.getDeclaredMethod("addURL", URL.class);
-            method.setAccessible(true);
-            method.invoke(sysloader, url);
-        } catch (Exception e) {
-            throw new FlywayException("Unable to load " + name, e);
-        }
+        return classLoader;
     }
 
     /**
@@ -332,51 +390,18 @@ public class Main {
      *
      * @param properties The properties object to load to configuration into.
      * @param args       The command-line arguments passed in.
+     * @param envVars    The environment variables, converted into properties.
      */
     /* private -> for testing */
-    static void loadConfiguration(Properties properties, String[] args) {
-        String encoding = determineConfigurationFileEncoding(args);
+    static void loadConfigurationFromConfigFiles(Properties properties, String[] args, Map<String, String> envVars) {
+        String encoding = determineConfigurationFileEncoding(args, envVars);
 
-        loadConfigurationFile(properties, getInstallationDir() + "/conf/flyway.conf", encoding, false);
-        loadConfigurationFile(properties, System.getProperty("user.home") + "/flyway.conf", encoding, false);
-        loadConfigurationFile(properties, "flyway.conf", encoding, false);
+        properties.putAll(ConfigUtils.loadConfigurationFile(new File(getInstallationDir() + "/conf/" + ConfigUtils.CONFIG_FILE_NAME), encoding, false));
+        properties.putAll(ConfigUtils.loadConfigurationFile(new File(System.getProperty("user.home") + "/" + ConfigUtils.CONFIG_FILE_NAME), encoding, false));
+        properties.putAll(ConfigUtils.loadConfigurationFile(new File(ConfigUtils.CONFIG_FILE_NAME), encoding, false));
 
-        String configFile = determineConfigurationFileArgument(args);
-        if (configFile != null) {
-            loadConfigurationFile(properties, configFile, encoding, true);
-        }
-    }
-
-    /**
-     * Loads the configuration from the configuration file. If a configuration file is specified using the -configfile
-     * argument it will be used, otherwise the default config file (conf/flyway.properties) will be loaded.
-     *
-     * @param properties    The properties object to load to configuration into.
-     * @param file          The configuration file to load.
-     * @param encoding      The encoding of the configuration file.
-     * @param failIfMissing Whether to fail if the file is missing.
-     * @return Whether the file was loaded successfully.
-     * @throws FlywayException when the configuration file could not be loaded.
-     */
-    private static boolean loadConfigurationFile(Properties properties, String file, String encoding, boolean failIfMissing) throws FlywayException {
-        File configFile = new File(file);
-        String errorMessage = "Unable to load config file: " + configFile.getAbsolutePath();
-
-        if (!configFile.isFile() || !configFile.canRead()) {
-            if (!failIfMissing) {
-                LOG.debug(errorMessage);
-                return false;
-            }
-            throw new FlywayException(errorMessage);
-        }
-
-        LOG.debug("Loading config file: " + configFile.getAbsolutePath());
-        try {
-            String contents = FileCopyUtils.copyToString(new InputStreamReader(new FileInputStream(configFile), encoding));
-            properties.load(new StringReader(contents.replace("\\", "\\\\")));
-            return true;
-        } catch (IOException e) {
-            throw new FlywayException(errorMessage, e);
+        for (File configFile : determineConfigFilesFromArgs(args, envVars)) {
+            properties.putAll(ConfigUtils.loadConfigurationFile(configFile, encoding, true));
         }
     }
 
@@ -393,13 +418,18 @@ public class Main {
             return;
         }
 
-        if (!properties.containsKey("flyway.user")) {
-            properties.put("flyway.user", console.readLine("Database user: "));
+        if (!properties.containsKey(ConfigUtils.URL)) {
+            // URL is not set. We are doomed for failure anyway.
+            return;
         }
 
-        if (!properties.containsKey("flyway.password")) {
+        if (!properties.containsKey(ConfigUtils.USER)) {
+            properties.put(ConfigUtils.USER, console.readLine("Database user: "));
+        }
+
+        if (!properties.containsKey(ConfigUtils.PASSWORD)) {
             char[] password = console.readPassword("Database password: ");
-            properties.put("flyway.password", password == null ? "" : String.valueOf(password));
+            properties.put(ConfigUtils.PASSWORD, password == null ? "" : String.valueOf(password));
         }
     }
 
@@ -412,25 +442,37 @@ public class Main {
         LOG.debug("Using configuration:");
         for (Map.Entry<Object, Object> entry : properties.entrySet()) {
             String value = entry.getValue().toString();
-            value = "flyway.password".equals(entry.getKey()) ? StringUtils.trimOrPad("", value.length(), '*') : value;
+            value = ConfigUtils.PASSWORD.equals(entry.getKey()) ? StringUtils.trimOrPad("", value.length(), '*') : value;
             LOG.debug(entry.getKey() + " -> " + value);
         }
     }
 
     /**
-     * Determines the file to use for loading the configuration.
+     * Determines the files to use for loading the configuration.
      *
-     * @param args The command-line arguments passed in.
-     * @return The path of the configuration file on disk.
+     * @param args    The command-line arguments passed in.
+     * @param envVars The environment variables converted to Flyway properties.
+     * @return The configuration files.
      */
-    private static String determineConfigurationFileArgument(String[] args) {
-        for (String arg : args) {
-            if (isPropertyArgument(arg) && "configFile".equals(getArgumentProperty(arg))) {
-                return getArgumentValue(arg);
+    private static List<File> determineConfigFilesFromArgs(String[] args, Map<String, String> envVars) {
+        List<File> configFiles = new ArrayList<>();
+
+        if (envVars.containsKey(ConfigUtils.CONFIG_FILES)) {
+            for (String file : StringUtils.tokenizeToStringArray(envVars.get(ConfigUtils.CONFIG_FILES), ",")) {
+                configFiles.add(new File(file));
             }
+            return configFiles;
         }
 
-        return null;
+        for (String arg : args) {
+            String argValue = getArgumentValue(arg);
+            if (isPropertyArgument(arg) && ConfigUtils.CONFIG_FILES.equals(getArgumentProperty(arg))) {
+                for (String file : StringUtils.tokenizeToStringArray(argValue, ",")) {
+                    configFiles.add(new File(file));
+                }
+            }
+        }
+        return configFiles;
     }
 
     /**
@@ -439,18 +481,27 @@ public class Main {
     @SuppressWarnings("ConstantConditions")
     private static String getInstallationDir() {
         String path = ClassUtils.getLocationOnDisk(Main.class);
-        return new File(path).getParentFile().getParentFile().getAbsolutePath();
+        return new File(path) // jar file
+                .getParentFile() // edition dir
+                .getParentFile() // lib dir
+                .getParentFile() // installation dir
+                .getAbsolutePath();
     }
 
     /**
      * Determines the encoding to use for loading the configuration.
      *
-     * @param args The command-line arguments passed in.
+     * @param args    The command-line arguments passed in.
+     * @param envVars The environment variables converted to Flyway properties.
      * @return The encoding. (default: UTF-8)
      */
-    private static String determineConfigurationFileEncoding(String[] args) {
+    private static String determineConfigurationFileEncoding(String[] args, Map<String, String> envVars) {
+        if (envVars.containsKey(ConfigUtils.CONFIG_FILE_ENCODING)) {
+            return envVars.get(ConfigUtils.CONFIG_FILE_ENCODING);
+        }
+
         for (String arg : args) {
-            if (isPropertyArgument(arg) && "configFileEncoding".equals(getArgumentProperty(arg))) {
+            if (isPropertyArgument(arg) && ConfigUtils.CONFIG_FILE_ENCODING.equals(getArgumentProperty(arg))) {
                 return getArgumentValue(arg);
             }
         }
@@ -465,10 +516,10 @@ public class Main {
      * @param args       The command-line arguments that were passed in.
      */
     /* private -> for testing*/
-    static void overrideConfiguration(Properties properties, String[] args) {
+    static void overrideConfigurationWithArgs(Properties properties, String[] args) {
         for (String arg : args) {
             if (isPropertyArgument(arg)) {
-                properties.put("flyway." + getArgumentProperty(arg), getArgumentValue(arg));
+                properties.put(getArgumentProperty(arg), getArgumentValue(arg));
             }
         }
     }
@@ -494,7 +545,7 @@ public class Main {
     static String getArgumentProperty(String arg) {
         int index = arg.indexOf("=");
 
-        return arg.substring(1, index);
+        return "flyway." + arg.substring(1, index);
     }
 
     /**
@@ -521,7 +572,7 @@ public class Main {
      * @return The operations. An empty list if none.
      */
     private static List<String> determineOperations(String[] args) {
-        List<String> operations = new ArrayList<String>();
+        List<String> operations = new ArrayList<>();
 
         for (String arg : args) {
             if (!arg.startsWith("-")) {

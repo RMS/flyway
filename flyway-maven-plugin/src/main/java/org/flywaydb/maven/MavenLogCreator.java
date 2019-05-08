@@ -1,5 +1,5 @@
-/**
- * Copyright 2010-2015 Axel Fontaine
+/*
+ * Copyright 2010-2018 Boxfuse GmbH
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,8 +15,8 @@
  */
 package org.flywaydb.maven;
 
-import org.flywaydb.core.internal.util.logging.Log;
-import org.flywaydb.core.internal.util.logging.LogCreator;
+import org.flywaydb.core.api.logging.Log;
+import org.flywaydb.core.api.logging.LogCreator;
 import org.apache.maven.plugin.AbstractMojo;
 
 /**
@@ -33,7 +33,7 @@ public class MavenLogCreator implements LogCreator {
      *
      * @param mojo The Maven Mojo to log for.
      */
-    public MavenLogCreator(AbstractMojo mojo) {
+    MavenLogCreator(AbstractMojo mojo) {
         this.mojo = mojo;
     }
 

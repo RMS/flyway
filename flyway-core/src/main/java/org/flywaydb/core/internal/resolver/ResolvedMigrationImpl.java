@@ -1,5 +1,5 @@
-/**
- * Copyright 2010-2015 Axel Fontaine
+/*
+ * Copyright 2010-2018 Boxfuse GmbH
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,8 +17,10 @@ package org.flywaydb.core.internal.resolver;
 
 import org.flywaydb.core.api.MigrationType;
 import org.flywaydb.core.api.MigrationVersion;
-import org.flywaydb.core.api.resolver.MigrationExecutor;
+import org.flywaydb.core.api.executor.MigrationExecutor;
 import org.flywaydb.core.api.resolver.ResolvedMigration;
+
+import java.util.Objects;
 
 /**
  * A migration available on the classpath.
@@ -159,21 +161,31 @@ public class ResolvedMigrationImpl implements ResolvedMigration {
         if (checksum != null ? !checksum.equals(migration.checksum) : migration.checksum != null) return false;
         if (description != null ? !description.equals(migration.description) : migration.description != null)
             return false;
-        if (physicalLocation != null ? !physicalLocation.equals(migration.physicalLocation) : migration.physicalLocation != null)
-            return false;
         if (script != null ? !script.equals(migration.script) : migration.script != null) return false;
         if (type != migration.type) return false;
-        return version.equals(migration.version);
+        return Objects.equals(version, migration.version);
     }
 
     @Override
     public int hashCode() {
-        int result = version.hashCode();
+        int result = (version != null ? version.hashCode() : 0);
         result = 31 * result + (description != null ? description.hashCode() : 0);
         result = 31 * result + (script != null ? script.hashCode() : 0);
         result = 31 * result + (checksum != null ? checksum.hashCode() : 0);
         result = 31 * result + type.hashCode();
-        result = 31 * result + (physicalLocation != null ? physicalLocation.hashCode() : 0);
         return result;
+    }
+
+    @Override
+    public String toString() {
+        return "ResolvedMigrationImpl{" +
+                "version=" + version +
+                ", description='" + description + '\'' +
+                ", script='" + script + '\'' +
+                ", checksum=" + checksum +
+                ", type=" + type +
+                ", physicalLocation='" + physicalLocation + '\'' +
+                ", executor=" + executor +
+                '}';
     }
 }

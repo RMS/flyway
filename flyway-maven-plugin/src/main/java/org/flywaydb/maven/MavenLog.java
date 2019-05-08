@@ -1,5 +1,5 @@
-/**
- * Copyright 2010-2015 Axel Fontaine
+/*
+ * Copyright 2010-2018 Boxfuse GmbH
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
  */
 package org.flywaydb.maven;
 
-import org.flywaydb.core.internal.util.logging.Log;
+import org.flywaydb.core.api.logging.Log;
 
 /**
  * Wrapper around a Maven Logger.
@@ -31,8 +31,13 @@ public class MavenLog implements Log {
      *
      * @param logger The original Maven Logger.
      */
-    public MavenLog(org.apache.maven.plugin.logging.Log logger) {
+    MavenLog(org.apache.maven.plugin.logging.Log logger) {
         this.logger = logger;
+    }
+
+    @Override
+    public boolean isDebugEnabled() {
+        return logger.isDebugEnabled();
     }
 
     public void debug(String message) {

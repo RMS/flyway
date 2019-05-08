@@ -1,5 +1,5 @@
-/**
- * Copyright 2010-2015 Axel Fontaine
+/*
+ * Copyright 2010-2018 Boxfuse GmbH
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,9 @@ package org.flywaydb.core.api.resolver;
 import java.util.Collection;
 
 /**
- * Resolves available migrations.
+ * Resolves available migrations. This interface can be implemented to create custom resolvers. A custom resolver
+ * can be used to create additional types of migrations not covered by the standard resolvers (jdbc, sql, spring-jdbc).
+ * Using the skipDefaultResolvers configuration property, the built-in resolvers can also be completely replaced.
  */
 public interface MigrationResolver {
     /**
@@ -26,5 +28,5 @@ public interface MigrationResolver {
      *
      * @return The available migrations.
      */
-    Collection<ResolvedMigration> resolveMigrations();
+    Collection<ResolvedMigration> resolveMigrations(Context context);
 }

@@ -1,5 +1,5 @@
-/**
- * Copyright 2010-2015 Axel Fontaine
+/*
+ * Copyright 2010-2018 Boxfuse GmbH
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,27 +15,29 @@
  */
 package org.flywaydb.core.internal.command;
 
+import org.flywaydb.core.api.FlywayException;
 import org.flywaydb.core.api.MigrationInfo;
+import org.flywaydb.core.api.MigrationState;
 import org.flywaydb.core.api.MigrationVersion;
-import org.flywaydb.core.api.callback.FlywayCallback;
+import org.flywaydb.core.api.callback.Event;
+import org.flywaydb.core.api.configuration.Configuration;
+import org.flywaydb.core.api.logging.Log;
+import org.flywaydb.core.api.logging.LogFactory;
 import org.flywaydb.core.api.resolver.MigrationResolver;
 import org.flywaydb.core.api.resolver.ResolvedMigration;
-import org.flywaydb.core.internal.dbsupport.DbSupport;
-import org.flywaydb.core.internal.dbsupport.Schema;
+import org.flywaydb.core.internal.callback.CallbackExecutor;
+import org.flywaydb.core.internal.database.base.Connection;
+import org.flywaydb.core.internal.database.base.Database;
 import org.flywaydb.core.internal.info.MigrationInfoImpl;
 import org.flywaydb.core.internal.info.MigrationInfoServiceImpl;
-import org.flywaydb.core.internal.metadatatable.AppliedMigration;
-import org.flywaydb.core.internal.metadatatable.MetaDataTable;
-import org.flywaydb.core.internal.util.ObjectUtils;
+import org.flywaydb.core.internal.schemahistory.AppliedMigration;
+import org.flywaydb.core.internal.schemahistory.SchemaHistory;
 import org.flywaydb.core.internal.util.StopWatch;
 import org.flywaydb.core.internal.util.TimeFormat;
-import org.flywaydb.core.internal.util.jdbc.TransactionCallback;
-import org.flywaydb.core.internal.util.jdbc.TransactionTemplate;
-import org.flywaydb.core.internal.util.logging.Log;
-import org.flywaydb.core.internal.util.logging.LogFactory;
+import org.flywaydb.core.internal.jdbc.TransactionTemplate;
 
-import java.sql.Connection;
-import java.sql.SQLException;
+import java.util.Objects;
+import java.util.concurrent.Callable;
 
 /**
  * Handles Flyway's repair command.
@@ -44,7 +46,7 @@ public class DbRepair {
     private static final Log LOG = LogFactory.getLog(DbRepair.class);
 
     /**
-     * The database connection to use for accessing the metadata table.
+     * The database connection to use for accessing the schema history table.
      */
     private final Connection connection;
 
@@ -54,107 +56,109 @@ public class DbRepair {
     private final MigrationInfoServiceImpl migrationInfoService;
 
     /**
-     * The schema containing the metadata table.
+     * The schema history table.
      */
-    private final Schema schema;
+    private final SchemaHistory schemaHistory;
 
     /**
-     * The metadata table.
+     * The callback executor.
      */
-    private final MetaDataTable metaDataTable;
-
-    /**
-     * This is a list of callbacks that fire before or after the repair task is executed.
-     * You can add as many callbacks as you want.  These should be set on the Flyway class
-     * by the end user as Flyway will set them automatically for you here.
-     */
-    private final FlywayCallback[] callbacks;
+    private final CallbackExecutor callbackExecutor;
 
     /**
      * The database-specific support.
      */
-    private final DbSupport dbSupport;
+    private final Database database;
 
     /**
      * Creates a new DbRepair.
      *
-     * @param dbSupport         The database-specific support.
-     * @param connection        The database connection to use for accessing the metadata table.
-     * @param schema            The database schema to use by default.
+     * @param database          The database-specific support.
      * @param migrationResolver The migration resolver.
-     * @param metaDataTable     The metadata table.
-     * @param callbacks         Callbacks for the Flyway lifecycle.
+     * @param schemaHistory     The schema history table.
+     * @param callbackExecutor  The callback executor.
      */
-    public DbRepair(DbSupport dbSupport, Connection connection, Schema schema, MigrationResolver migrationResolver, MetaDataTable metaDataTable, FlywayCallback[] callbacks) {
-        this.dbSupport = dbSupport;
-        this.connection = connection;
-        this.schema = schema;
-        this.migrationInfoService = new MigrationInfoServiceImpl(migrationResolver, metaDataTable, MigrationVersion.LATEST, true, true);
-        this.metaDataTable = metaDataTable;
-        this.callbacks = callbacks;
+    public DbRepair(Database database, MigrationResolver migrationResolver, SchemaHistory schemaHistory,
+                    CallbackExecutor callbackExecutor, Configuration configuration) {
+        this.database = database;
+        this.connection = database.getMainConnection();
+        this.migrationInfoService = new MigrationInfoServiceImpl(migrationResolver, schemaHistory, configuration,
+                MigrationVersion.LATEST, true, true, true, true, true);
+        this.schemaHistory = schemaHistory;
+        this.callbackExecutor = callbackExecutor;
     }
 
     /**
-     * Repairs the metadata table.
+     * Repairs the schema history table.
      */
     public void repair() {
-        try {
-            for (final FlywayCallback callback : callbacks) {
-                new TransactionTemplate(connection).execute(new TransactionCallback<Object>() {
-                    @Override
-                    public Object doInTransaction() throws SQLException {
-                        dbSupport.changeCurrentSchemaTo(schema);
-                        callback.beforeRepair(connection);
-                        return null;
-                    }
-                });
-            }
+        callbackExecutor.onEvent(Event.BEFORE_REPAIR);
 
+        try {
             StopWatch stopWatch = new StopWatch();
             stopWatch.start();
 
-            new TransactionTemplate(connection).execute(new TransactionCallback<Void>() {
-                public Void doInTransaction() {
-                    dbSupport.changeCurrentSchemaTo(schema);
-                    metaDataTable.removeFailedMigrations();
-
+            boolean repaired = new TransactionTemplate(connection.getJdbcConnection()).execute(new Callable<Boolean>() {
+                public Boolean call() {
+                    schemaHistory.removeFailedMigrations();
                     migrationInfoService.refresh();
-                    for (MigrationInfo migrationInfo : migrationInfoService.all()) {
-                        MigrationInfoImpl migrationInfoImpl = (MigrationInfoImpl) migrationInfo;
 
-                        ResolvedMigration resolved = migrationInfoImpl.getResolvedMigration();
-                        AppliedMigration applied = migrationInfoImpl.getAppliedMigration();
-                        if ((resolved != null) && (applied != null)) {
-                            if (!ObjectUtils.nullSafeEquals(resolved.getChecksum(), applied.getChecksum())) {
-                                metaDataTable.updateChecksum(migrationInfoImpl.getVersion(), resolved.getChecksum());
-                            }
-                        }
-                    }
-
-                    return null;
+                    return alignAppliedMigrationsWithResolvedMigrations();
                 }
             });
 
             stopWatch.stop();
 
-            LOG.info("Metadata table " + metaDataTable + " successfully repaired (execution time "
+            LOG.info("Successfully repaired schema history table " + schemaHistory + " (execution time "
                     + TimeFormat.format(stopWatch.getTotalTimeMillis()) + ").");
-            if (!dbSupport.supportsDdlTransactions()) {
+            if (repaired && !database.supportsDdlTransactions()) {
                 LOG.info("Manual cleanup of the remaining effects the failed migration may still be required.");
             }
-
-            for (final FlywayCallback callback : callbacks) {
-                new TransactionTemplate(connection).execute(new TransactionCallback<Object>() {
-                    @Override
-                    public Object doInTransaction() throws SQLException {
-                        dbSupport.changeCurrentSchemaTo(schema);
-                        callback.afterRepair(connection);
-                        return null;
-                    }
-                });
-            }
-        } finally {
-            dbSupport.restoreCurrentSchema();
+        } catch (FlywayException e) {
+            callbackExecutor.onEvent(Event.AFTER_REPAIR_ERROR);
+            throw e;
         }
+
+        callbackExecutor.onEvent(Event.AFTER_REPAIR);
+    }
+
+    private boolean alignAppliedMigrationsWithResolvedMigrations() {
+        boolean repaired = false;
+        for (MigrationInfo migrationInfo : migrationInfoService.all()) {
+            MigrationInfoImpl migrationInfoImpl = (MigrationInfoImpl) migrationInfo;
+
+            ResolvedMigration resolved = migrationInfoImpl.getResolvedMigration();
+            AppliedMigration applied = migrationInfoImpl.getAppliedMigration();
+            if (resolved != null
+                    && resolved.getVersion() != null
+                    && applied != null
+                    && !applied.getType().isSynthetic()
+
+
+
+                    && updateNeeded(resolved, applied)) {
+                schemaHistory.update(applied, resolved);
+                repaired = true;
+            }
+        }
+        return repaired;
+    }
+
+    private boolean updateNeeded(ResolvedMigration resolved, AppliedMigration applied) {
+        return checksumUpdateNeeded(resolved, applied)
+        || descriptionUpdateNeeded(resolved, applied)
+        || typeUpdateNeeded(resolved, applied);
+    }
+
+    private boolean checksumUpdateNeeded(ResolvedMigration resolved, AppliedMigration applied) {
+        return !Objects.equals(resolved.getChecksum(), applied.getChecksum());
+    }
+
+    private boolean descriptionUpdateNeeded(ResolvedMigration resolved, AppliedMigration applied) {
+        return !Objects.equals(resolved.getDescription(), applied.getDescription());
+    }
+
+    private boolean typeUpdateNeeded(ResolvedMigration resolved, AppliedMigration applied) {
+        return !Objects.equals(resolved.getType(), applied.getType());
     }
 }

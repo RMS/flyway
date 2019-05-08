@@ -1,5 +1,5 @@
-/**
- * Copyright 2010-2015 Axel Fontaine
+/*
+ * Copyright 2010-2018 Boxfuse GmbH
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,13 +17,14 @@ package org.flywaydb.core.api.resolver;
 
 import org.flywaydb.core.api.MigrationType;
 import org.flywaydb.core.api.MigrationVersion;
+import org.flywaydb.core.api.executor.MigrationExecutor;
 
 /**
  * Migration resolved through a MigrationResolver. Can be applied against a database.
  */
 public interface ResolvedMigration {
     /**
-     * @return The version of the database after applying this migration.
+     * @return The version of the database after applying this migration. {@code null} for repeatable migrations.
      */
     MigrationVersion getVersion();
 
